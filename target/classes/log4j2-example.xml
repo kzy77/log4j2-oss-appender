@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN" packages="io.github.ossappender.log4j2">
+  <Appenders>
+    <OssAppender name="oss" endpoint="https://oss-cn-hangzhou.aliyuncs.com"
+                 accessKeyId="${sys:ALIYUN_AK}" accessKeySecret="${sys:ALIYUN_SK}"
+                 bucket="your-bucket" objectPrefix="app-logs/"
+                 queueSize="65536" maxBatchMessages="500" maxBatchBytes="524288"
+                 flushIntervalMillis="1000" gzipEnabled="true" blockWhenQueueFull="true"
+                 maxRetry="5" baseBackoffMillis="200">
+      <PatternLayout pattern="%d{ISO8601} %level %logger - %msg%n"/>
+    </OssAppender>
+  </Appenders>
+
+  <Loggers>
+    <Root level="info">
+      <AppenderRef ref="oss"/>
+    </Root>
+  </Loggers>
+</Configuration>
+
+
