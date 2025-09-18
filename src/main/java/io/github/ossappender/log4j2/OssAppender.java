@@ -32,7 +32,7 @@ public class OssAppender extends AbstractAppender {
 
     private final boolean blockWhenQueueFull;
     private final UploadHooks hooks;
-    private final BatchingQueue batchingQueue;
+    private final Object queueImpl; // BatchingQueue 或 DisruptorBatchingQueue
     private final OssUploader uploader;
 
     protected OssAppender(String name, Filter filter, Layout<? extends Serializable> layout,
@@ -41,7 +41,8 @@ public class OssAppender extends AbstractAppender {
                           long flushIntervalMillis, boolean gzipEnabled,
                           boolean blockWhenQueueFull, int maxRetry, long baseBackoffMillis,
                           String endpoint, String accessKeyId, String accessKeySecret,
-                          String bucket, String objectPrefix) {
+                          String bucket, String objectPrefix,
+                          boolean useDisruptor, boolean multiProducer) {
         super(name, filter, layout, ignoreExceptions, properties);
         this.blockWhenQueueFull = blockWhenQueueFull;
         this.hooks = UploadHooks.noop();
@@ -51,12 +52,23 @@ public class OssAppender extends AbstractAppender {
                 gzipEnabled, maxRetry, baseBackoffMillis, 30_000L,
                 hooks
         );
-        this.batchingQueue = new BatchingQueue(
-                queueSize, maxBatchMessages, maxBatchBytes, flushIntervalMillis,
-                blockWhenQueueFull,
-                (events, totalBytes) -> { uploader.uploadBatch(events, totalBytes); return true; }
-        );
-        this.batchingQueue.start();
+        if (useDisruptor) {
+            io.github.ossappender.core.DisruptorBatchingQueue dq = new io.github.ossappender.core.DisruptorBatchingQueue(
+                    nearestPowerOfTwo(queueSize), maxBatchMessages, maxBatchBytes, flushIntervalMillis,
+                    blockWhenQueueFull, multiProducer,
+                    (events, totalBytes) -> { uploader.uploadBatch(events, totalBytes); return true; }
+            );
+            dq.start();
+            this.queueImpl = dq;
+        } else {
+            BatchingQueue bq = new BatchingQueue(
+                    queueSize, maxBatchMessages, maxBatchBytes, flushIntervalMillis,
+                    blockWhenQueueFull,
+                    (events, totalBytes) -> { uploader.uploadBatch(events, totalBytes); return true; }
+            );
+            bq.start();
+            this.queueImpl = bq;
+        }
     }
 
     /**
@@ -67,7 +79,9 @@ public class OssAppender extends AbstractAppender {
     public void append(LogEvent event) {
         try {
             byte[] bytes = getLayout().toByteArray(event);
-            boolean accepted = batchingQueue.offer(bytes);
+            boolean accepted = (queueImpl instanceof BatchingQueue)
+                    ? ((BatchingQueue) queueImpl).offer(bytes)
+                    : ((io.github.ossappender.core.DisruptorBatchingQueue) queueImpl).offer(bytes);
             if (!accepted && !blockWhenQueueFull) {
                 hooks.onDropped(bytes.length, -1);
             }
@@ -87,9 +101,18 @@ public class OssAppender extends AbstractAppender {
      */
     @Override
     public void stop() {
-        try { batchingQueue.close(); } catch (Throwable ignore) {}
+        try {
+            if (queueImpl instanceof BatchingQueue) ((BatchingQueue) queueImpl).close();
+            else ((io.github.ossappender.core.DisruptorBatchingQueue) queueImpl).close();
+        } catch (Throwable ignore) {}
         try { uploader.close(); } catch (Throwable ignore) {}
         super.stop();
+    }
+
+    private static int nearestPowerOfTwo(int n) {
+        int x = 1;
+        while (x < n) x <<= 1;
+        return x;
     }
 
     /**
@@ -166,6 +189,10 @@ public class OssAppender extends AbstractAppender {
         private String bucket;
         @PluginAttribute("objectPrefix")
         private String objectPrefix = "logs/";
+        @PluginAttribute("useDisruptor")
+        private boolean useDisruptor = false;
+        @PluginAttribute("multiProducer")
+        private boolean multiProducer = true;
 
         @Override
         public OssAppender build() {
@@ -182,7 +209,8 @@ public class OssAppender extends AbstractAppender {
             return new OssAppender(name, filter, layout, true, Property.EMPTY_ARRAY,
                     queueSize, maxBatchMessages, maxBatchBytes, flushIntervalMillis,
                     gzipEnabled, blockWhenQueueFull, maxRetry, baseBackoffMillis,
-                    endpoint, accessKeyId, accessKeySecret, bucket, objectPrefix);
+                    endpoint, accessKeyId, accessKeySecret, bucket, objectPrefix,
+                    useDisruptor, multiProducer);
         }
 
         // 以下为链式 setter，便于程序化配置
