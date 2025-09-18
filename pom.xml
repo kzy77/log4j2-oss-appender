@@ -25,6 +25,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>io.github.ossappender</groupId>
+            <artifactId>log-java-producer</artifactId>
+            <version>0.1.0</version>
+        </dependency>
+        <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-api</artifactId>
             <version>${log4j2.version}</version>
@@ -36,17 +41,7 @@
             <scope>provided</scope>
         </dependency>
 
-        <dependency>
-            <groupId>com.aliyun.oss</groupId>
-            <artifactId>aliyun-sdk-oss</artifactId>
-            <version>${aliyun.oss.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-compress</artifactId>
-            <version>1.26.1</version>
-        </dependency>
+        <!-- aliyun 及压缩依赖由 log-java-producer 提供 -->
     </dependencies>
 
     <build>

@@ -1,8 +1,9 @@
 package io.github.ossappender.log4j2;
 
-import com.aliyun.oss.OSS;
-import com.aliyun.oss.OSSClientBuilder;
-import com.aliyun.oss.model.ObjectMetadata;
+// 改为依赖公共 core 组件
+import io.github.ossappender.core.BatchingQueue;
+import io.github.ossappender.core.OssUploader;
+import io.github.ossappender.core.UploadHooks;
 import org.apache.logging.log4j.core.Filter;
 import org.apache.logging.log4j.core.Layout;
 import org.apache.logging.log4j.core.LogEvent;
@@ -14,20 +15,8 @@ import org.apache.logging.log4j.core.config.plugins.PluginBuilderFactory;
 import org.apache.logging.log4j.core.config.plugins.PluginElement;
 import org.apache.logging.log4j.core.util.Throwables;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.io.Serializable;
-import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.Objects;
-import java.util.Queue;
-import java.util.UUID;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.zip.GZIPOutputStream;
 
 /**
  * 高性能 Log4j2 Appender：将日志实时上传至阿里云 OSS。
@@ -41,24 +30,10 @@ import java.util.zip.GZIPOutputStream;
 @Plugin(name = "OssAppender", category = "Core", elementType = "appender", printObject = true)
 public class OssAppender extends AbstractAppender {
 
-    private final ArrayBlockingQueue<byte[]> queue;
-    private final ExecutorService executor;
-    private final int maxBatchMessages;
-    private final int maxBatchBytes;
-    private final long flushIntervalMillis;
-    private final boolean gzipEnabled;
     private final boolean blockWhenQueueFull;
-    private final int maxRetry;
-    private final long baseBackoffMillis;
-
-    private final String endpoint;
-    private final String accessKeyId;
-    private final String accessKeySecret;
-    private final String bucket;
-    private final String objectPrefix;
-
-    private volatile boolean running = true;
-    private volatile OSS ossClient;
+    private final UploadHooks hooks;
+    private final BatchingQueue batchingQueue;
+    private final OssUploader uploader;
 
     protected OssAppender(String name, Filter filter, Layout<? extends Serializable> layout,
                           boolean ignoreExceptions, Property[] properties,
@@ -68,24 +43,20 @@ public class OssAppender extends AbstractAppender {
                           String endpoint, String accessKeyId, String accessKeySecret,
                           String bucket, String objectPrefix) {
         super(name, filter, layout, ignoreExceptions, properties);
-        this.queue = new ArrayBlockingQueue<>(queueSize);
-        this.executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "log4j2-oss-uploader");
-            t.setDaemon(true);
-            return t;
-        });
-        this.maxBatchMessages = maxBatchMessages;
-        this.maxBatchBytes = maxBatchBytes;
-        this.flushIntervalMillis = flushIntervalMillis;
-        this.gzipEnabled = gzipEnabled;
         this.blockWhenQueueFull = blockWhenQueueFull;
-        this.maxRetry = maxRetry;
-        this.baseBackoffMillis = baseBackoffMillis;
-        this.endpoint = endpoint;
-        this.accessKeyId = accessKeyId;
-        this.accessKeySecret = accessKeySecret;
-        this.bucket = bucket;
-        this.objectPrefix = objectPrefix == null ? "logs/" : objectPrefix;
+        this.hooks = UploadHooks.noop();
+        this.uploader = new OssUploader(
+                endpoint, accessKeyId, accessKeySecret,
+                bucket, objectPrefix == null ? "logs" : objectPrefix,
+                gzipEnabled, maxRetry, baseBackoffMillis, 30_000L,
+                hooks
+        );
+        this.batchingQueue = new BatchingQueue(
+                queueSize, maxBatchMessages, maxBatchBytes, flushIntervalMillis,
+                blockWhenQueueFull,
+                (events, totalBytes) -> { uploader.uploadBatch(events, totalBytes); return true; }
+        );
+        this.batchingQueue.start();
     }
 
     /**
@@ -96,17 +67,12 @@ public class OssAppender extends AbstractAppender {
     public void append(LogEvent event) {
         try {
             byte[] bytes = getLayout().toByteArray(event);
-            if (blockWhenQueueFull) {
-                queue.put(bytes);
-            } else {
-                queue.offer(bytes); // 丢弃策略：队列满时丢弃
+            boolean accepted = batchingQueue.offer(bytes);
+            if (!accepted && !blockWhenQueueFull) {
+                hooks.onDropped(bytes.length, -1);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         } catch (Throwable t) {
-            if (!ignoreExceptions()) {
-                Throwables.rethrow(t);
-            }
+            if (!ignoreExceptions()) Throwables.rethrow(t);
         }
     }
 
@@ -114,162 +80,44 @@ public class OssAppender extends AbstractAppender {
      * 初始化 OSS 客户端并启动后台消费线程。
      */
     @Override
-    public void start() {
-        super.start();
-        this.ossClient = new OSSClientBuilder().build(endpoint, accessKeyId, accessKeySecret);
-        executor.submit(this::drainLoop);
-    }
+    public void start() { super.start(); }
 
     /**
      * 优雅关闭：停止线程，刷出剩余批次并关闭 OSS 客户端。
      */
     @Override
     public void stop() {
-        running = false;
-        executor.shutdown();
-        try {
-            executor.awaitTermination(5, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        // 尝试同步刷出剩余数据
-        flushOnce(true);
-        if (ossClient != null) {
-            ossClient.shutdown();
-        }
+        try { batchingQueue.close(); } catch (Throwable ignore) {}
+        try { uploader.close(); } catch (Throwable ignore) {}
         super.stop();
     }
 
     /**
      * 后台线程主循环：按条数/字节/时间阈值聚合并触发上传。
      */
-    private void drainLoop() {
-        long lastFlush = System.currentTimeMillis();
-        Queue<byte[]> batch = new ArrayDeque<>(maxBatchMessages);
-        int batchBytes = 0;
-        try {
-            while (running) {
-                long wait = flushIntervalMillis - (System.currentTimeMillis() - lastFlush);
-                if (wait <= 0) wait = 50L;
-                byte[] item = queue.poll(wait, TimeUnit.MILLISECONDS);
-                if (item != null) {
-                    batch.add(item);
-                    batchBytes += item.length;
-                }
-                boolean timeUp = (System.currentTimeMillis() - lastFlush) >= flushIntervalMillis;
-                boolean sizeReached = batch.size() >= maxBatchMessages || batchBytes >= maxBatchBytes;
-                if (timeUp || sizeReached) {
-                    if (!batch.isEmpty()) {
-                        uploadBatch(batch);
-                        batch.clear();
-                        batchBytes = 0;
-                    }
-                    lastFlush = System.currentTimeMillis();
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } finally {
-            // 退出前最后刷出
-            if (!batch.isEmpty()) {
-                uploadBatch(batch);
-            }
-        }
-    }
+    // 旧的 drainLoop / 上传逻辑由通用组件替代
 
-    /**
-     * 在停止阶段同步尝试刷出队列中的剩余数据。
-     */
-    private void flushOnce(boolean drainAll) {
-        Queue<byte[]> batch = new ArrayDeque<>(maxBatchMessages);
-        int batchBytes = 0;
-        long start = System.currentTimeMillis();
-        while (!queue.isEmpty() && (drainAll || (System.currentTimeMillis() - start) < 1000)) {
-            byte[] item = queue.poll();
-            if (item == null) break;
-            batch.add(item);
-            batchBytes += item.length;
-            if (batch.size() >= maxBatchMessages || batchBytes >= maxBatchBytes) {
-                uploadBatch(batch);
-                batch.clear();
-                batchBytes = 0;
-            }
-        }
-        if (!batch.isEmpty()) {
-            uploadBatch(batch);
-        }
-    }
+    // 不再需要 flushOnce，批处理由 BatchingQueue 管理
 
     /**
      * 执行批量上传：合并为 JSON Lines 文本，可选 gzip；失败按指数退避重试。
      */
-    private void uploadBatch(Queue<byte[]> batch) {
-        if (batch.isEmpty()) return;
-        try {
-            byte[] payload = joinWithNewline(batch);
-            if (gzipEnabled) {
-                payload = gzip(payload);
-            }
-            String objectKey = buildObjectKey();
-            ObjectMetadata meta = new ObjectMetadata();
-            meta.setContentLength(payload.length);
-            meta.setContentType("application/json; charset=utf-8");
-            if (gzipEnabled) meta.setContentEncoding("gzip");
-
-            int attempt = 0;
-            while (true) {
-                try {
-                    ossClient.putObject(bucket, objectKey, new ByteArrayInputStream(payload), meta);
-                    break;
-                } catch (Throwable t) {
-                    attempt++;
-                    if (attempt > maxRetry) throw t;
-                    Thread.sleep(Math.min(30_000L, baseBackoffMillis * (1L << (attempt - 1))));
-                }
-            }
-        } catch (Throwable t) {
-            if (!ignoreExceptions()) {
-                Throwables.rethrow(t);
-            }
-        }
-    }
+    // 由通用 uploader 处理
 
     /**
      * 将多条日志字节以换行符拼接成 JSON Lines。
      */
-    private static byte[] joinWithNewline(Queue<byte[]> batch) {
-        int size = 0;
-        for (byte[] b : batch) size += b.length + 1;
-        ByteArrayOutputStream out = new ByteArrayOutputStream(size);
-        int i = 0, n = batch.size();
-        for (byte[] b : batch) {
-            out.write(b, 0, b.length);
-            if (++i < n) out.write('\n');
-        }
-        return out.toByteArray();
-    }
+    // 由通用 uploader 处理
 
     /**
      * 对给定字节数组进行 gzip 压缩。
      */
-    private static byte[] gzip(byte[] data) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(256, data.length / 4));
-        GZIPOutputStream gzip = new GZIPOutputStream(out);
-        gzip.write(data);
-        gzip.finish();
-        gzip.close();
-        return out.toByteArray();
-    }
+    // 由通用 uploader 处理
 
     /**
      * 生成对象键：前缀 + 时间戳 + UUID + 后缀。
      */
-    private String buildObjectKey() {
-        Instant now = Instant.now();
-        String ts = String.valueOf(now.toEpochMilli());
-        String uuid = UUID.randomUUID().toString();
-        return objectPrefix + ts + "-" + uuid + (gzipEnabled ? ".log.gz" : ".log");
-    }
+    // 由通用 uploader 处理
 
     /**
      * Appender Builder。支持在 log4j2.xml 中配置。
