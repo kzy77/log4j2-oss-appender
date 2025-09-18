@@ -86,7 +86,12 @@ public class OssAppender extends AbstractAppender {
                 hooks.onDropped(bytes.length, -1);
             }
         } catch (Throwable t) {
-            if (!ignoreExceptions()) Throwables.rethrow(t);
+            try {
+                org.apache.logging.log4j.LogManager.getLogger(OssAppender.class)
+                        .warn("Failed to append log event to queue", t);
+            } catch (Throwable ignore) {
+                // ensure never affect business thread
+            }
         }
     }
 
@@ -104,8 +109,12 @@ public class OssAppender extends AbstractAppender {
         try {
             if (queueImpl instanceof BatchingQueue) ((BatchingQueue) queueImpl).close();
             else ((io.github.ossappender.core.DisruptorBatchingQueue) queueImpl).close();
-        } catch (Throwable ignore) {}
-        try { uploader.close(); } catch (Throwable ignore) {}
+        } catch (Throwable t) {
+            try { org.apache.logging.log4j.LogManager.getLogger(OssAppender.class).warn("Failed to close queue", t); } catch (Throwable ignore) {}
+        }
+        try { uploader.close(); } catch (Throwable t) {
+            try { org.apache.logging.log4j.LogManager.getLogger(OssAppender.class).warn("Failed to close uploader", t); } catch (Throwable ignore) {}
+        }
         super.stop();
     }
 
