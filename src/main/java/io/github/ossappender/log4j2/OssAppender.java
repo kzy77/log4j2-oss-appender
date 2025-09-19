@@ -32,7 +32,8 @@ public class OssAppender extends AbstractAppender {
 
     private final boolean blockWhenQueueFull;
     private final UploadHooks hooks;
-    private final Object queueImpl; // BatchingQueue 或 DisruptorBatchingQueue
+    // BatchingQueue 或 DisruptorBatchingQueue
+    private final Object queueImpl;
     private final OssUploader uploader;
 
     protected OssAppender(String name, Filter filter, Layout<? extends Serializable> layout,
@@ -99,7 +100,9 @@ public class OssAppender extends AbstractAppender {
      * 初始化 OSS 客户端并启动后台消费线程。
      */
     @Override
-    public void start() { super.start(); }
+    public void start() {
+        super.start();
+    }
 
     /**
      * 优雅关闭：停止线程，刷出剩余批次并关闭 OSS 客户端。
@@ -107,48 +110,51 @@ public class OssAppender extends AbstractAppender {
     @Override
     public void stop() {
         try {
-            if (queueImpl instanceof BatchingQueue) ((BatchingQueue) queueImpl).close();
-            else ((io.github.ossappender.core.DisruptorBatchingQueue) queueImpl).close();
+            if (queueImpl instanceof BatchingQueue) {
+                ((BatchingQueue) queueImpl).close();
+            } else {
+                ((io.github.ossappender.core.DisruptorBatchingQueue) queueImpl).close();
+            }
         } catch (Throwable t) {
-            try { org.apache.logging.log4j.LogManager.getLogger(OssAppender.class).warn("Failed to close queue", t); } catch (Throwable ignore) {}
+            try {
+                org.apache.logging.log4j.LogManager.getLogger(OssAppender.class).warn("Failed to close queue", t);
+            } catch (Throwable ignore) {
+            }
         }
-        try { uploader.close(); } catch (Throwable t) {
-            try { org.apache.logging.log4j.LogManager.getLogger(OssAppender.class).warn("Failed to close uploader", t); } catch (Throwable ignore) {}
+        try {
+            uploader.close();
+        } catch (Throwable t) {
+            try {
+                org.apache.logging.log4j.LogManager.getLogger(OssAppender.class).warn("Failed to close uploader", t);
+            } catch (Throwable ignore) {
+            }
         }
         super.stop();
     }
 
     private static int nearestPowerOfTwo(int n) {
         int x = 1;
-        while (x < n) x <<= 1;
+        while (x < n) {
+            x <<= 1;
+        }
         return x;
     }
 
-    /**
-     * 后台线程主循环：按条数/字节/时间阈值聚合并触发上传。
-     */
+    // 后台线程主循环：按条数/字节/时间阈值聚合并触发上传。
     // 旧的 drainLoop / 上传逻辑由通用组件替代
 
     // 不再需要 flushOnce，批处理由 BatchingQueue 管理
 
-    /**
-     * 执行批量上传：合并为 JSON Lines 文本，可选 gzip；失败按指数退避重试。
-     */
+    // 执行批量上传：合并为 JSON Lines 文本，可选 gzip；失败按指数退避重试。
     // 由通用 uploader 处理
 
-    /**
-     * 将多条日志字节以换行符拼接成 JSON Lines。
-     */
+    // 将多条日志字节以换行符拼接成 JSON Lines。
     // 由通用 uploader 处理
 
-    /**
-     * 对给定字节数组进行 gzip 压缩。
-     */
+    // 对给定字节数组进行 gzip 压缩。
     // 由通用 uploader 处理
 
-    /**
-     * 生成对象键：前缀 + 时间戳 + UUID + 后缀。
-     */
+    // 生成对象键：前缀 + 时间戳 + UUID + 后缀。
     // 由通用 uploader 处理
 
     /**
@@ -241,5 +247,3 @@ public class OssAppender extends AbstractAppender {
         public Builder setObjectPrefix(String v) { this.objectPrefix = v; return this; }
     }
 }
-
-
