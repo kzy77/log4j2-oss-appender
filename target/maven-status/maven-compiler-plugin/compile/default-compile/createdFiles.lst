@@ -1,5 +1,0 @@
-io/github/ossappender/log4j2/S3Appender.class
-io/github/ossappender/log4j2/S3Appender$Builder.class
-META-INF/org/apache/logging/log4j/core/config/plugins/Log4j2Plugins.dat
-io/github/ossappender/adapter/S3Log4j2Adapter$Config.class
-io/github/ossappender/adapter/S3Log4j2Adapter.class
