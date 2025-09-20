@@ -1,8 +1,9 @@
-# log4j2-oss-appender
+# Log4j2 OSS Appender
 
 高性能 Log4j2 Appender，将应用日志实时上传至阿里云 OSS。
 
-特性：
+## 特性
+
 - 不落盘：日志直接入内存队列并异步上传
 - 无需改造：仅配置即可接入
 - 异步高吞吐：批处理、压缩、连接复用
@@ -17,7 +18,7 @@ Maven（示例）：
   <groupId>io.github.ossappender</groupId>
   <artifactId>log4j2-oss-appender</artifactId>
   <version>0.1.0</version>
- </dependency>
+</dependency>
 ```
 
 ## 快速开始（log4j2.xml）
@@ -63,10 +64,6 @@ Maven（示例）：
 - `maxRetry`：上传重试次数
 - `baseBackoffMillis`：指数退避起始毫秒
 
-## Cloudflare Pages/GitHub 导入
-
-该库为纯 Java SDK，推荐以 Maven Central 使用。若需在 Cloudflare Pages 文档站或示例站展示，请将本仓库导入 GitHub 并在 Pages 绑定构建静态站（例如使用 Docusaurus/SvelteKit 文档）。
-
-## 许可
+## 许可证
 
 Apache-2.0
